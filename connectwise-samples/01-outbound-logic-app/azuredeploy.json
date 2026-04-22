@@ -1,0 +1,257 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "cf-to-cw-outbound",
+      "metadata": { "description": "Logic App workflow name." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "metadata": { "description": "Key Vault holding the secret named 'cf-webhook-secret'." }
+    },
+    "cwBaseUrl": {
+      "type": "string",
+      "metadata": { "description": "ConnectWise REST base URL, e.g. https://na.myconnectwise.net/v4_6_release/apis/3.0" }
+    },
+    "cwCompanyId": {
+      "type": "string",
+      "metadata": { "description": "ConnectWise company id." }
+    },
+    "cwClientId": {
+      "type": "string",
+      "metadata": { "description": "Registered ConnectWise integration client id." }
+    },
+    "cwPublicKey": {
+      "type": "securestring",
+      "metadata": { "description": "Public key of the dedicated CW API member." }
+    },
+    "cwPrivateKey": {
+      "type": "securestring",
+      "metadata": { "description": "Private key of the dedicated CW API member." }
+    },
+    "cwDefaultBoardId": {
+      "type": "int",
+      "metadata": { "description": "Numeric id of the board tickets should land on." }
+    },
+    "cwDefaultCompanyIdentifier": {
+      "type": "string",
+      "metadata": { "description": "Company identifier (string) for the end customer." }
+    }
+  },
+  "variables": {
+    "cwBasicAuth": "[base64(concat(parameters('cwCompanyId'), '+', parameters('cwPublicKey'), ':', parameters('cwPrivateKey')))]",
+    "cwApiVersionHeader": "application/vnd.connectwise.com+json; version=2020.1"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": { "type": "SystemAssigned" },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "keyVaultName": { "type": "string" },
+            "cwBaseUrl": { "type": "string" },
+            "cwAuthorization": { "type": "securestring" },
+            "cwClientId": { "type": "string" },
+            "cwApiVersion": { "type": "string" },
+            "cwDefaultBoardId": { "type": "int" },
+            "cwDefaultCompanyIdentifier": { "type": "string" }
+          },
+          "triggers": {
+            "cf_webhook": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "method": "POST",
+                "schema": {}
+              }
+            }
+          },
+          "actions": {
+            "get_cf_secret": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat('https://', parameters('keyVaultName'), '.vault.azure.net/secrets/cf-webhook-secret?api-version=7.4')}",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://vault.azure.net"
+                }
+              },
+              "runAfter": {}
+            },
+            "verify_signature": {
+              "type": "JavaScriptCode",
+              "inputs": {
+                "code": "const crypto = require('crypto');\nconst secret = workflowContext.actions.get_cf_secret.outputs.body.value;\nconst headers = workflowContext.trigger.outputs.headers;\nconst timestamp = headers['X-CF-Timestamp'];\nconst rawBody = workflowContext.trigger.outputs.body;\nconst bodyString = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody);\nconst received = headers['X-CF-Signature'] || '';\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${bodyString}`).digest('hex');\nconst a = Buffer.from(expected);\nconst b = Buffer.from(received);\nconst valid = a.length === b.length && crypto.timingSafeEqual(a, b);\nreturn { valid, eventId: headers['X-CF-Event-Id'], schema: headers['X-CF-Schema'] };"
+              },
+              "runAfter": { "get_cf_secret": ["Succeeded"] }
+            },
+            "reject_if_invalid": {
+              "type": "If",
+              "expression": {
+                "equals": [ "@body('verify_signature').valid", false ]
+              },
+              "actions": {
+                "respond_401": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": {
+                    "statusCode": 401,
+                    "body": { "error": "invalid signature" }
+                  }
+                },
+                "terminate_failure": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Failed" },
+                  "runAfter": { "respond_401": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "verify_signature": ["Succeeded"] }
+            },
+            "parse_body": {
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "timestamp": { "type": "string" },
+                    "isTest": { "type": "boolean" },
+                    "occurredAt": { "type": "string" },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "accountId": { "type": "string" },
+                        "accountName": { "type": "string" },
+                        "incidentId": { "type": "string" },
+                        "incidentNumber": { "type": "integer" },
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "severity": { "type": "string" },
+                        "source": { "type": "string" },
+                        "sourceDisplayName": { "type": "string" },
+                        "createdAt": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              },
+              "runAfter": { "reject_if_invalid": ["Succeeded"] }
+            },
+            "find_existing_ticket": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('cwBaseUrl'), '/service/tickets')}",
+                "queries": {
+                  "conditions": "@{concat('externalReference = \"cf|', body('parse_body')?['data']?['source'], '|', body('parse_body')?['data']?['incidentId'], '\"')}",
+                  "pageSize": "1"
+                },
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('cwAuthorization'))}",
+                  "clientId": "@parameters('cwClientId')",
+                  "Accept": "@parameters('cwApiVersion')"
+                }
+              },
+              "runAfter": { "parse_body": ["Succeeded"] }
+            },
+            "compose_ticket_payload": {
+              "type": "Compose",
+              "inputs": {
+                "summary": "@{take(concat('[CF #', string(body('parse_body')?['data']?['incidentNumber']), '] ', body('parse_body')?['data']?['title']), 100)}",
+                "initialDescription": "@{concat('ContraForce incident ', body('parse_body')?['data']?['incidentId'], '\\n\\nSeverity: ', body('parse_body')?['data']?['severity'], '\\nSource: ', body('parse_body')?['data']?['sourceDisplayName'], '\\n\\n', coalesce(body('parse_body')?['data']?['description'], ''))}",
+                "board": { "id": "@parameters('cwDefaultBoardId')" },
+                "company": { "identifier": "@parameters('cwDefaultCompanyIdentifier')" },
+                "priority": {
+                  "id": "@{if(equals(body('parse_body')?['data']?['severity'], 'High'), 1, if(equals(body('parse_body')?['data']?['severity'], 'Medium'), 2, 3))}"
+                },
+                "externalReference": "@{concat('cf|', body('parse_body')?['data']?['source'], '|', body('parse_body')?['data']?['incidentId'])}"
+              },
+              "runAfter": { "find_existing_ticket": ["Succeeded"] }
+            },
+            "decide_create_or_update": {
+              "type": "If",
+              "expression": {
+                "greater": [ "@length(coalesce(body('find_existing_ticket'), json('[]')))", 0 ]
+              },
+              "actions": {
+                "update_ticket": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "@{concat(parameters('cwBaseUrl'), '/service/tickets/', string(first(body('find_existing_ticket'))['id']), '/notes')}",
+                    "headers": {
+                      "Authorization": "@{concat('Basic ', parameters('cwAuthorization'))}",
+                      "clientId": "@parameters('cwClientId')",
+                      "Accept": "@parameters('cwApiVersion')",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "text": "@{concat('ContraForce re-delivered event ', body('verify_signature').eventId)}",
+                      "detailDescriptionFlag": true
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {
+                  "create_ticket": {
+                    "type": "Http",
+                    "inputs": {
+                      "method": "POST",
+                      "uri": "@{concat(parameters('cwBaseUrl'), '/service/tickets')}",
+                      "headers": {
+                        "Authorization": "@{concat('Basic ', parameters('cwAuthorization'))}",
+                        "clientId": "@parameters('cwClientId')",
+                        "Accept": "@parameters('cwApiVersion')",
+                        "Content-Type": "application/json"
+                      },
+                      "body": "@outputs('compose_ticket_payload')"
+                    }
+                  }
+                }
+              },
+              "runAfter": { "compose_ticket_payload": ["Succeeded"] }
+            },
+            "respond_ok": {
+              "type": "Response",
+              "kind": "Http",
+              "inputs": { "statusCode": 200, "body": { "status": "accepted" } },
+              "runAfter": { "decide_create_or_update": ["Succeeded", "Skipped"] }
+            }
+          }
+        },
+        "parameters": {
+          "keyVaultName": { "value": "[parameters('keyVaultName')]" },
+          "cwBaseUrl": { "value": "[parameters('cwBaseUrl')]" },
+          "cwAuthorization": { "value": "[variables('cwBasicAuth')]" },
+          "cwClientId": { "value": "[parameters('cwClientId')]" },
+          "cwApiVersion": { "value": "[variables('cwApiVersionHeader')]" },
+          "cwDefaultBoardId": { "value": "[parameters('cwDefaultBoardId')]" },
+          "cwDefaultCompanyIdentifier": { "value": "[parameters('cwDefaultCompanyIdentifier')]" }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workflowPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('workflowName')), '2019-05-01', 'Full').identity.principalId]"
+    }
+  }
+}

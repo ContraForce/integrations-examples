@@ -1,0 +1,27 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local secrets — all samples use *.Example.json / *.example.json as templates
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/appsettings.*.local.json
+**/azuredeploy.parameters.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tool caches
+.nuget/
+.dotnet/

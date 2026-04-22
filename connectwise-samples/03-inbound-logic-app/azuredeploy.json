@@ -1,0 +1,246 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "cw-to-cf-inbound"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "cwBaseUrl": { "type": "string" },
+    "cwCompanyId": { "type": "string" },
+    "cwClientId": { "type": "string" },
+    "cwPublicKey": { "type": "securestring" },
+    "cwPrivateKey": { "type": "securestring" },
+    "callbackSecret": {
+      "type": "securestring",
+      "metadata": { "description": "Shared secret expected on X-Callback-Secret header." }
+    },
+    "cfApiBaseUrl": {
+      "type": "string",
+      "metadata": { "description": "e.g. https://prod.platform.contraforce.com/api/v2" }
+    },
+    "cfServiceAccountClientId": { "type": "string" },
+    "cfServiceAccountClientSecret": { "type": "securestring" },
+    "cfWorkspaceId": { "type": "string" }
+  },
+  "variables": {
+    "cwBasicAuth": "[base64(concat(parameters('cwCompanyId'), '+', parameters('cwPublicKey'), ':', parameters('cwPrivateKey')))]",
+    "cfBasicAuth": "[base64(concat(parameters('cfServiceAccountClientId'), ':', parameters('cfServiceAccountClientSecret')))]",
+    "cwApiVersionHeader": "application/vnd.connectwise.com+json; version=2020.1"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": { "type": "SystemAssigned" },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "cwBaseUrl": { "type": "string" },
+            "cwAuthorization": { "type": "securestring" },
+            "cwClientId": { "type": "string" },
+            "cwApiVersion": { "type": "string" },
+            "callbackSecret": { "type": "securestring" },
+            "cfApiBaseUrl": { "type": "string" },
+            "cfAuthorization": { "type": "securestring" },
+            "cfWorkspaceId": { "type": "string" }
+          },
+          "triggers": {
+            "cw_callback": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "method": "POST",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ID": { "type": "integer" },
+                    "Type": { "type": "string" },
+                    "Action": { "type": "string" },
+                    "MemberID": { "type": "string" },
+                    "ObjectID": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "actions": {
+            "check_secret": {
+              "type": "If",
+              "expression": {
+                "not": {
+                  "equals": [
+                    "@triggerOutputs()?['headers']?['X-Callback-Secret']",
+                    "@parameters('callbackSecret')"
+                  ]
+                }
+              },
+              "actions": {
+                "respond_401": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 401, "body": { "error": "invalid callback secret" } }
+                },
+                "terminate_failure": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Failed" },
+                  "runAfter": { "respond_401": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": {}
+            },
+            "check_entity_type": {
+              "type": "If",
+              "expression": {
+                "not": { "equals": [ "@triggerBody()?['Type']", "ServiceTicket" ] }
+              },
+              "actions": {
+                "respond_ignored": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 200, "body": { "status": "ignored", "reason": "not a ServiceTicket" } }
+                },
+                "terminate_succeeded": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Succeeded" },
+                  "runAfter": { "respond_ignored": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "check_secret": ["Succeeded"] }
+            },
+            "get_ticket": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('cwBaseUrl'), '/service/tickets/', string(triggerBody()?['ObjectID']))}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('cwAuthorization'))}",
+                  "clientId": "@parameters('cwClientId')",
+                  "Accept": "@parameters('cwApiVersion')"
+                }
+              },
+              "runAfter": { "check_entity_type": ["Succeeded"] }
+            },
+            "parse_external_reference": {
+              "type": "Compose",
+              "inputs": {
+                "value": "@{coalesce(body('get_ticket')?['externalReference'], '')}",
+                "parts": "@split(coalesce(body('get_ticket')?['externalReference'], ''), '|')"
+              },
+              "runAfter": { "get_ticket": ["Succeeded"] }
+            },
+            "check_is_cf_ticket": {
+              "type": "If",
+              "expression": {
+                "or": [
+                  { "less": [ "@length(outputs('parse_external_reference').parts)", 3 ] },
+                  { "not": { "equals": [ "@outputs('parse_external_reference').parts[0]", "cf" ] } }
+                ]
+              },
+              "actions": {
+                "respond_not_cf": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 200, "body": { "status": "ignored", "reason": "not a CF-linked ticket" } }
+                },
+                "terminate_not_cf": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Succeeded" },
+                  "runAfter": { "respond_not_cf": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "parse_external_reference": ["Succeeded"] }
+            },
+            "get_latest_note": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('cwBaseUrl'), '/service/tickets/', string(triggerBody()?['ObjectID']), '/notes?orderBy=id+desc&pageSize=1')}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('cwAuthorization'))}",
+                  "clientId": "@parameters('cwClientId')",
+                  "Accept": "@parameters('cwApiVersion')"
+                }
+              },
+              "runAfter": { "check_is_cf_ticket": ["Succeeded"] }
+            },
+            "post_comment_to_cf": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@{concat(parameters('cfApiBaseUrl'), '/workspaces/', parameters('cfWorkspaceId'), '/incidents/', encodeUriComponent(outputs('parse_external_reference').parts[2]), '/comments')}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('cfAuthorization'))}",
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "incidentId": "@outputs('parse_external_reference').parts[2]",
+                  "content": "@{concat('[CW ticket #', string(triggerBody()?['ObjectID']), ' note by ', coalesce(first(body('get_latest_note'))?['_info']?['updatedBy'], triggerBody()?['MemberID'], 'unknown'), ']\n\n', coalesce(first(body('get_latest_note'))?['text'], ''))}",
+                  "source": "@outputs('parse_external_reference').parts[1]"
+                }
+              },
+              "runAfter": { "get_latest_note": ["Succeeded"] }
+            },
+            "check_closed": {
+              "type": "If",
+              "expression": {
+                "equals": [ "@body('get_ticket')?['closedFlag']", true ]
+              },
+              "actions": {
+                "close_cf_incident": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "@{concat(parameters('cfApiBaseUrl'), '/workspaces/', parameters('cfWorkspaceId'), '/incidents/', encodeUriComponent(outputs('parse_external_reference').parts[2]), '/status')}",
+                    "headers": {
+                      "Authorization": "@{concat('Basic ', parameters('cfAuthorization'))}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "incidentId": "@outputs('parse_external_reference').parts[2]",
+                      "source": "@outputs('parse_external_reference').parts[1]",
+                      "status": "Closed",
+                      "comment": "@{concat('Closed in ConnectWise (ticket #', string(triggerBody()?['ObjectID']), ').')}",
+                      "classification": "Undetermined",
+                      "classificationReason": "InaccurateData"
+                    }
+                  }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "post_comment_to_cf": ["Succeeded"] }
+            },
+            "respond_ok": {
+              "type": "Response",
+              "kind": "Http",
+              "inputs": { "statusCode": 200, "body": { "status": "processed" } },
+              "runAfter": { "check_closed": ["Succeeded", "Skipped"] }
+            }
+          }
+        },
+        "parameters": {
+          "cwBaseUrl": { "value": "[parameters('cwBaseUrl')]" },
+          "cwAuthorization": { "value": "[variables('cwBasicAuth')]" },
+          "cwClientId": { "value": "[parameters('cwClientId')]" },
+          "cwApiVersion": { "value": "[variables('cwApiVersionHeader')]" },
+          "callbackSecret": { "value": "[parameters('callbackSecret')]" },
+          "cfApiBaseUrl": { "value": "[parameters('cfApiBaseUrl')]" },
+          "cfAuthorization": { "value": "[variables('cfBasicAuth')]" },
+          "cfWorkspaceId": { "value": "[parameters('cfWorkspaceId')]" }
+        }
+      }
+    }
+  ]
+}

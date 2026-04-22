@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": { "value": "cw-to-cf-inbound" },
+    "cwBaseUrl": { "value": "https://na.myconnectwise.net/v4_6_release/apis/3.0" },
+    "cwCompanyId": { "value": "yourcompanyid" },
+    "cwClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "cwPublicKey": { "value": "<public-key>" },
+    "cwPrivateKey": { "value": "<private-key>" },
+    "callbackSecret": { "value": "<pick-a-strong-random-value>" },
+    "cfApiBaseUrl": { "value": "https://prod.platform.contraforce.com/api/v2" },
+    "cfServiceAccountClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "cfServiceAccountClientSecret": { "value": "<service-account-secret>" },
+    "cfWorkspaceId": { "value": "00000000-0000-0000-0000-000000000000" }
+  }
+}

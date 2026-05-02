@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": { "value": "cf-to-halo-outbound" },
+    "keyVaultName": { "value": "kv-your-integrations" },
+    "haloAuthUrl": { "value": "https://yourname.halopsa.com/auth" },
+    "haloApiBaseUrl": { "value": "https://yourname.halopsa.com/api" },
+    "haloClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "haloClientSecret": { "value": "<halo-client-secret>" },
+    "haloTenant": { "value": "" },
+    "haloDefaultTicketTypeId": { "value": 29 },
+    "haloDefaultClientId": { "value": 1 }
+  }
+}

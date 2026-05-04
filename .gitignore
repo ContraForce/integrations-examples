@@ -9,11 +9,14 @@
 *.user
 *.suo
 
-# Local secrets — all samples use *.Example.json / *.example.json as templates
+# Local secrets — all samples use *.Example.json / *.example.json / .env.example as templates
 **/appsettings.Development.json
 **/appsettings.Local.json
 **/appsettings.*.local.json
 **/azuredeploy.parameters.json
+**/.env
+**/.env.local
+!**/.env.example
 
 # OS
 .DS_Store
@@ -25,3 +28,11 @@ Thumbs.db
 # Tool caches
 .nuget/
 .dotnet/
+
+# Python
+**/__pycache__/
+*.pyc
+**/.venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/

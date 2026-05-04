@@ -11,7 +11,8 @@ configuration — never baked in.
 
 | Folder | Scenario |
 |--------|----------|
-| [`connectwise-samples/`](./connectwise-samples) | Bi-directional integration with ConnectWise Manage PSA. Four drop-in implementations: Logic App and ASP.NET Core variants for both inbound and outbound flows. |
+| [`connectwise-samples/`](./connectwise-samples) | Bi-directional integration with ConnectWise Manage PSA. Six drop-in implementations: Logic App, ASP.NET Core, and Python (FastAPI) variants for both inbound and outbound flows. |
+| [`halopsa-samples/`](./halopsa-samples) | Bi-directional integration with HaloPSA. Six drop-in implementations: Logic App, ASP.NET Core, and Python (FastAPI) variants for both inbound and outbound flows. Halo auth uses OAuth2 `client_credentials`. |
 
 More scenarios (ServiceNow, Jira Service Management, Microsoft Teams,
 PagerDuty, Slack…) may land here over time.
@@ -36,10 +37,12 @@ endpoints it relies on.
 - Samples use **.NET 8 LTS** for the web app variants so they run on any
   supported .NET 8 host (App Service, Container Apps, AKS, or plain
   containers).
+- Python samples use **Python 3.12** + **FastAPI** + **httpx** + **pydantic
+  v2** and ship with a Dockerfile so they run on the same hosts.
 - Logic App samples target **Consumption SKU** Azure Logic Apps.
 - All configurable values live in `appsettings.Example.json` /
-  `azuredeploy.parameters.example.json` files. Copy them to a local,
-  git-ignored equivalent before running.
+  `azuredeploy.parameters.example.json` / `.env.example` files. Copy them
+  to a local, git-ignored equivalent before running.
 - No secret is ever committed — every `REPLACE_…` string is a placeholder.
 
 ## Contributing

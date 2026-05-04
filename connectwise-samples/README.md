@@ -27,6 +27,8 @@ with a ConnectWise Manage PSA instance in both directions.
 | [02](./02-outbound-webapp) | CF → CW | ASP.NET Core 8 minimal API | More control, custom mapping logic, containerizable |
 | [03](./03-inbound-logic-app) | CW → CF | Azure Logic App (Consumption) | Low-code inbound receiver driven by ConnectWise Callbacks |
 | [04](./04-inbound-webapp) | CW → CF | ASP.NET Core 8 minimal API | Inbound receiver when you need richer mapping/enrichment |
+| [05](./05-outbound-python) | CF → CW | FastAPI (Python 3.12) | Same as 02, in Python — drop-in replacement for shops that prefer Python |
+| [06](./06-inbound-python) | CW → CF | FastAPI (Python 3.12) | Same as 04, in Python |
 
 You can deploy **any combination** — e.g. a Logic App for outbound and a web app
 for inbound. They are independent.

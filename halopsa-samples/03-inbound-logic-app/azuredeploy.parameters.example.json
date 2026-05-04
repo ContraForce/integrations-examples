@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": { "value": "halo-to-cf-inbound" },
+    "haloAuthUrl": { "value": "https://yourname.halopsa.com/auth" },
+    "haloApiBaseUrl": { "value": "https://yourname.halopsa.com/api" },
+    "haloClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "haloClientSecret": { "value": "<halo-client-secret>" },
+    "haloTenant": { "value": "" },
+    "haloClosedStatusId": { "value": 9 },
+    "callbackSecret": { "value": "<pick-a-strong-random-value>" },
+    "cfApiBaseUrl": { "value": "https://prod.platform.contraforce.com/api/v2" },
+    "cfServiceAccountClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "cfServiceAccountClientSecret": { "value": "<service-account-secret>" },
+    "cfWorkspaceId": { "value": "00000000-0000-0000-0000-000000000000" }
+  }
+}

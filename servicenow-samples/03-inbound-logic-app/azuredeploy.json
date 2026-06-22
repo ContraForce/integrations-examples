@@ -1,0 +1,275 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "snow-to-cf-inbound"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "snowInstanceUrl": {
+      "type": "string",
+      "metadata": { "description": "ServiceNow instance base URL, e.g. https://dev12345.service-now.com" }
+    },
+    "snowUsername": { "type": "securestring" },
+    "snowPassword": { "type": "securestring" },
+    "snowResolvedState": {
+      "type": "int",
+      "defaultValue": 6,
+      "metadata": { "description": "Numeric incident state that represents Resolved." }
+    },
+    "snowClosedState": {
+      "type": "int",
+      "defaultValue": 7,
+      "metadata": { "description": "Numeric incident state that represents Closed." }
+    },
+    "callbackSecret": {
+      "type": "securestring",
+      "metadata": { "description": "Shared secret expected on X-SNow-Secret header." }
+    },
+    "cfApiBaseUrl": {
+      "type": "string",
+      "metadata": { "description": "e.g. https://prod.platform.contraforce.com/api/v2" }
+    },
+    "cfServiceAccountClientId": { "type": "string" },
+    "cfServiceAccountClientSecret": { "type": "securestring" },
+    "cfWorkspaceId": { "type": "string" }
+  },
+  "variables": {
+    "snowTableIncident": "[concat(parameters('snowInstanceUrl'), '/api/now/table/incident')]",
+    "snowTableJournal": "[concat(parameters('snowInstanceUrl'), '/api/now/table/sys_journal_field')]",
+    "snowAuthorization": "[base64(concat(parameters('snowUsername'), ':', parameters('snowPassword')))]",
+    "cfBasicAuth": "[base64(concat(parameters('cfServiceAccountClientId'), ':', parameters('cfServiceAccountClientSecret')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": { "type": "SystemAssigned" },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "snowTableIncident": { "type": "string" },
+            "snowTableJournal": { "type": "string" },
+            "snowAuthorization": { "type": "securestring" },
+            "snowResolvedState": { "type": "int" },
+            "snowClosedState": { "type": "int" },
+            "callbackSecret": { "type": "securestring" },
+            "cfApiBaseUrl": { "type": "string" },
+            "cfAuthorization": { "type": "securestring" },
+            "cfWorkspaceId": { "type": "string" }
+          },
+          "triggers": {
+            "snow_callback": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "method": "POST",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sys_id": { "type": "string" },
+                    "number": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "actions": {
+            "check_secret": {
+              "type": "If",
+              "expression": {
+                "not": {
+                  "equals": [
+                    "@triggerOutputs()?['headers']?['X-SNow-Secret']",
+                    "@parameters('callbackSecret')"
+                  ]
+                }
+              },
+              "actions": {
+                "respond_401": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 401, "body": { "error": "invalid callback secret" } }
+                },
+                "terminate_failure": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Failed" },
+                  "runAfter": { "respond_401": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": {}
+            },
+            "check_has_sys_id": {
+              "type": "If",
+              "expression": {
+                "equals": [ "@coalesce(triggerBody()?['sys_id'], '')", "" ]
+              },
+              "actions": {
+                "respond_no_sys_id": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 200, "body": { "status": "ignored", "reason": "no sys_id in payload" } }
+                },
+                "terminate_no_sys_id": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Succeeded" },
+                  "runAfter": { "respond_no_sys_id": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "check_secret": ["Succeeded"] }
+            },
+            "get_incident": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('snowTableIncident'), '/', triggerBody()?['sys_id'], '?sysparm_exclude_reference_link=true&sysparm_fields=sys_id,number,state,correlation_id,short_description')}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('snowAuthorization'))}",
+                  "Accept": "application/json"
+                }
+              },
+              "runAfter": { "check_has_sys_id": ["Succeeded"] }
+            },
+            "parse_external_reference": {
+              "type": "Compose",
+              "inputs": {
+                "value": "@coalesce(body('get_incident')?['result']?['correlation_id'], '')",
+                "parts": "@split(coalesce(body('get_incident')?['result']?['correlation_id'], ''), '|')"
+              },
+              "runAfter": { "get_incident": ["Succeeded"] }
+            },
+            "check_is_cf_ticket": {
+              "type": "If",
+              "expression": {
+                "or": [
+                  { "less": [ "@length(outputs('parse_external_reference').parts)", 3 ] },
+                  { "not": { "equals": [ "@outputs('parse_external_reference').parts[0]", "cf" ] } }
+                ]
+              },
+              "actions": {
+                "respond_not_cf": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": { "statusCode": 200, "body": { "status": "ignored", "reason": "not a CF-linked incident" } }
+                },
+                "terminate_not_cf": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Succeeded" },
+                  "runAfter": { "respond_not_cf": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "parse_external_reference": ["Succeeded"] }
+            },
+            "get_latest_comment": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('snowTableJournal'), '?sysparm_limit=1&sysparm_fields=sys_id,element,value,sys_created_on,sys_created_by&sysparm_query=', encodeUriComponent(concat('element_id=', triggerBody()?['sys_id'], '^element=comments^ORDERBYDESCsys_created_on')))}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('snowAuthorization'))}",
+                  "Accept": "application/json"
+                }
+              },
+              "runAfter": { "check_is_cf_ticket": ["Succeeded"] }
+            },
+            "extract_latest_comment": {
+              "type": "Compose",
+              "inputs": "@first(coalesce(body('get_latest_comment')?['result'], json('[]')))",
+              "runAfter": { "get_latest_comment": ["Succeeded"] }
+            },
+            "post_comment_to_cf": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  { "not": { "equals": [ "@outputs('extract_latest_comment')", null ] } },
+                  { "greater": [ "@length(coalesce(outputs('extract_latest_comment')?['value'], ''))", 0 ] }
+                ]
+              },
+              "actions": {
+                "send_cf_comment": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "@{concat(parameters('cfApiBaseUrl'), '/workspaces/', parameters('cfWorkspaceId'), '/incidents/', encodeUriComponent(outputs('parse_external_reference').parts[2]), '/comments')}",
+                    "headers": {
+                      "Authorization": "@{concat('Basic ', parameters('cfAuthorization'))}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "incidentId": "@outputs('parse_external_reference').parts[2]",
+                      "content": "@{concat('[ServiceNow ', coalesce(body('get_incident')?['result']?['number'], ''), ' comment by ', coalesce(outputs('extract_latest_comment')?['sys_created_by'], 'ServiceNow'), ']\n\n', coalesce(outputs('extract_latest_comment')?['value'], ''))}",
+                      "source": "@outputs('parse_external_reference').parts[1]"
+                    }
+                  }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "extract_latest_comment": ["Succeeded"] }
+            },
+            "check_closed": {
+              "type": "If",
+              "expression": {
+                "or": [
+                  { "equals": [ "@body('get_incident')?['result']?['state']", "@string(parameters('snowResolvedState'))" ] },
+                  { "equals": [ "@body('get_incident')?['result']?['state']", "@string(parameters('snowClosedState'))" ] }
+                ]
+              },
+              "actions": {
+                "close_cf_incident": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "@{concat(parameters('cfApiBaseUrl'), '/workspaces/', parameters('cfWorkspaceId'), '/incidents/', encodeUriComponent(outputs('parse_external_reference').parts[2]), '/status')}",
+                    "headers": {
+                      "Authorization": "@{concat('Basic ', parameters('cfAuthorization'))}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "incidentId": "@outputs('parse_external_reference').parts[2]",
+                      "source": "@outputs('parse_external_reference').parts[1]",
+                      "status": "Closed",
+                      "comment": "@{concat('Closed in ServiceNow (incident ', coalesce(body('get_incident')?['result']?['number'], ''), ', state ', coalesce(body('get_incident')?['result']?['state'], ''), ').')}",
+                      "classification": "Undetermined",
+                      "classificationReason": "InaccurateData"
+                    }
+                  }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "post_comment_to_cf": ["Succeeded", "Skipped"] }
+            },
+            "respond_ok": {
+              "type": "Response",
+              "kind": "Http",
+              "inputs": { "statusCode": 200, "body": { "status": "processed" } },
+              "runAfter": { "check_closed": ["Succeeded", "Skipped"] }
+            }
+          }
+        },
+        "parameters": {
+          "snowTableIncident": { "value": "[variables('snowTableIncident')]" },
+          "snowTableJournal": { "value": "[variables('snowTableJournal')]" },
+          "snowAuthorization": { "value": "[variables('snowAuthorization')]" },
+          "snowResolvedState": { "value": "[parameters('snowResolvedState')]" },
+          "snowClosedState": { "value": "[parameters('snowClosedState')]" },
+          "callbackSecret": { "value": "[parameters('callbackSecret')]" },
+          "cfApiBaseUrl": { "value": "[parameters('cfApiBaseUrl')]" },
+          "cfAuthorization": { "value": "[variables('cfBasicAuth')]" },
+          "cfWorkspaceId": { "value": "[parameters('cfWorkspaceId')]" }
+        }
+      }
+    }
+  ]
+}

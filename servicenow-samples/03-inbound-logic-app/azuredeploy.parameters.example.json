@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": { "value": "snow-to-cf-inbound" },
+    "snowInstanceUrl": { "value": "https://dev12345.service-now.com" },
+    "snowUsername": { "value": "contraforce.integration" },
+    "snowPassword": { "value": "<snow-password>" },
+    "snowResolvedState": { "value": 6 },
+    "snowClosedState": { "value": 7 },
+    "callbackSecret": { "value": "<pick-a-strong-random-value>" },
+    "cfApiBaseUrl": { "value": "https://prod.platform.contraforce.com/api/v2" },
+    "cfServiceAccountClientId": { "value": "00000000-0000-0000-0000-000000000000" },
+    "cfServiceAccountClientSecret": { "value": "<service-account-secret>" },
+    "cfWorkspaceId": { "value": "00000000-0000-0000-0000-000000000000" }
+  }
+}

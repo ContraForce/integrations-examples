@@ -1,0 +1,227 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "cf-to-snow-outbound",
+      "metadata": { "description": "Logic App workflow name." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "metadata": { "description": "Key Vault holding the secret named 'cf-webhook-secret'." }
+    },
+    "snowInstanceUrl": {
+      "type": "string",
+      "metadata": { "description": "ServiceNow instance base URL, e.g. https://dev12345.service-now.com" }
+    },
+    "snowUsername": {
+      "type": "securestring",
+      "metadata": { "description": "Username of the dedicated ServiceNow integration user." }
+    },
+    "snowPassword": {
+      "type": "securestring",
+      "metadata": { "description": "Password for the ServiceNow integration user." }
+    },
+    "snowDefaultImpact": {
+      "type": "int",
+      "defaultValue": 2,
+      "metadata": { "description": "Default impact (1=High, 2=Medium, 3=Low). Priority is derived from urgency x impact." }
+    }
+  },
+  "variables": {
+    "snowTableApi": "[concat(parameters('snowInstanceUrl'), '/api/now/table/incident')]",
+    "snowAuthorization": "[base64(concat(parameters('snowUsername'), ':', parameters('snowPassword')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": { "type": "SystemAssigned" },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "keyVaultName": { "type": "string" },
+            "snowTableApi": { "type": "string" },
+            "snowAuthorization": { "type": "securestring" },
+            "snowDefaultImpact": { "type": "int" }
+          },
+          "triggers": {
+            "cf_webhook": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "method": "POST",
+                "schema": {}
+              }
+            }
+          },
+          "actions": {
+            "get_cf_secret": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat('https://', parameters('keyVaultName'), '.vault.azure.net/secrets/cf-webhook-secret?api-version=7.4')}",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://vault.azure.net"
+                }
+              },
+              "runAfter": {}
+            },
+            "verify_signature": {
+              "type": "JavaScriptCode",
+              "inputs": {
+                "code": "const crypto = require('crypto');\nconst secret = workflowContext.actions.get_cf_secret.outputs.body.value;\nconst headers = workflowContext.trigger.outputs.headers;\nconst timestamp = headers['X-CF-Timestamp'];\nconst rawBody = workflowContext.trigger.outputs.body;\nconst bodyString = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody);\nconst received = headers['X-CF-Signature'] || '';\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${bodyString}`).digest('hex');\nconst a = Buffer.from(expected);\nconst b = Buffer.from(received);\nconst valid = a.length === b.length && crypto.timingSafeEqual(a, b);\nreturn { valid, eventId: headers['X-CF-Event-Id'], schema: headers['X-CF-Schema'] };"
+              },
+              "runAfter": { "get_cf_secret": ["Succeeded"] }
+            },
+            "reject_if_invalid": {
+              "type": "If",
+              "expression": {
+                "equals": [ "@body('verify_signature').valid", false ]
+              },
+              "actions": {
+                "respond_401": {
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": {
+                    "statusCode": 401,
+                    "body": { "error": "invalid signature" }
+                  }
+                },
+                "terminate_failure": {
+                  "type": "Terminate",
+                  "inputs": { "runStatus": "Failed" },
+                  "runAfter": { "respond_401": ["Succeeded"] }
+                }
+              },
+              "else": { "actions": {} },
+              "runAfter": { "verify_signature": ["Succeeded"] }
+            },
+            "parse_body": {
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "timestamp": { "type": "string" },
+                    "isTest": { "type": "boolean" },
+                    "occurredAt": { "type": "string" },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "accountId": { "type": "string" },
+                        "accountName": { "type": "string" },
+                        "incidentId": { "type": "string" },
+                        "incidentNumber": { "type": "integer" },
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "severity": { "type": "string" },
+                        "source": { "type": "string" },
+                        "sourceDisplayName": { "type": "string" },
+                        "createdAt": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              },
+              "runAfter": { "reject_if_invalid": ["Succeeded"] }
+            },
+            "find_existing_incident": {
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('snowTableApi'), '?sysparm_limit=1&sysparm_exclude_reference_link=true&sysparm_fields=sys_id,number,state&sysparm_query=', encodeUriComponent(concat('correlation_id=cf|', body('parse_body')?['data']?['source'], '|', body('parse_body')?['data']?['incidentId'])))}",
+                "headers": {
+                  "Authorization": "@{concat('Basic ', parameters('snowAuthorization'))}",
+                  "Accept": "application/json"
+                }
+              },
+              "runAfter": { "parse_body": ["Succeeded"] }
+            },
+            "compose_snow_incident": {
+              "type": "Compose",
+              "inputs": {
+                "short_description": "@{take(concat('[CF #', string(body('parse_body')?['data']?['incidentNumber']), '] ', body('parse_body')?['data']?['title']), 160)}",
+                "description": "@{concat('ContraForce incident ', body('parse_body')?['data']?['incidentId'], ' (#', string(body('parse_body')?['data']?['incidentNumber']), ')\n\nSeverity: ', body('parse_body')?['data']?['severity'], '\nSource: ', body('parse_body')?['data']?['sourceDisplayName'], '\n\n', coalesce(body('parse_body')?['data']?['description'], ''))}",
+                "urgency": "@{if(equals(body('parse_body')?['data']?['severity'], 'High'), '1', if(equals(body('parse_body')?['data']?['severity'], 'Medium'), '2', '3'))}",
+                "impact": "@{string(parameters('snowDefaultImpact'))}",
+                "correlation_id": "@{concat('cf|', body('parse_body')?['data']?['source'], '|', body('parse_body')?['data']?['incidentId'])}"
+              },
+              "runAfter": { "find_existing_incident": ["Succeeded"] }
+            },
+            "decide_create_or_update": {
+              "type": "If",
+              "expression": {
+                "greater": [ "@length(coalesce(body('find_existing_incident')?['result'], json('[]')))", 0 ]
+              },
+              "actions": {
+                "post_redelivery_note": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "PATCH",
+                    "uri": "@{concat(parameters('snowTableApi'), '/', first(body('find_existing_incident')?['result'])?['sys_id'], '?sysparm_fields=sys_id')}",
+                    "headers": {
+                      "Authorization": "@{concat('Basic ', parameters('snowAuthorization'))}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "work_notes": "@{concat('ContraForce re-delivered event ', body('verify_signature').eventId)}"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {
+                  "create_incident": {
+                    "type": "Http",
+                    "inputs": {
+                      "method": "POST",
+                      "uri": "@{concat(parameters('snowTableApi'), '?sysparm_exclude_reference_link=true&sysparm_fields=sys_id,number,state')}",
+                      "headers": {
+                        "Authorization": "@{concat('Basic ', parameters('snowAuthorization'))}",
+                        "Content-Type": "application/json"
+                      },
+                      "body": "@outputs('compose_snow_incident')"
+                    }
+                  }
+                }
+              },
+              "runAfter": { "compose_snow_incident": ["Succeeded"] }
+            },
+            "respond_ok": {
+              "type": "Response",
+              "kind": "Http",
+              "inputs": { "statusCode": 200, "body": { "status": "accepted" } },
+              "runAfter": { "decide_create_or_update": ["Succeeded", "Skipped"] }
+            }
+          }
+        },
+        "parameters": {
+          "keyVaultName": { "value": "[parameters('keyVaultName')]" },
+          "snowTableApi": { "value": "[variables('snowTableApi')]" },
+          "snowAuthorization": { "value": "[variables('snowAuthorization')]" },
+          "snowDefaultImpact": { "value": "[parameters('snowDefaultImpact')]" }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workflowPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('workflowName')), '2019-05-01', 'Full').identity.principalId]"
+    }
+  }
+}

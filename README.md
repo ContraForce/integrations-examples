@@ -13,9 +13,10 @@ configuration — never baked in.
 |--------|----------|
 | [`connectwise-samples/`](./connectwise-samples) | Bi-directional integration with ConnectWise Manage PSA. Six drop-in implementations: Logic App, ASP.NET Core, and Python (FastAPI) variants for both inbound and outbound flows. |
 | [`halopsa-samples/`](./halopsa-samples) | Bi-directional integration with HaloPSA. Six drop-in implementations: Logic App, ASP.NET Core, and Python (FastAPI) variants for both inbound and outbound flows. Halo auth uses OAuth2 `client_credentials`. |
+| [`servicenow-samples/`](./servicenow-samples) | Bi-directional integration with ServiceNow. Six drop-in implementations (Logic App, ASP.NET Core, Python) plus a native **Flow Designer + IntegrationHub** guide that builds the integration entirely in-platform. Uses the Table API with HTTP Basic auth; the external reference rides in the native `correlation_id` field. |
 
-More scenarios (ServiceNow, Jira Service Management, Microsoft Teams,
-PagerDuty, Slack…) may land here over time.
+More scenarios (Jira Service Management, Microsoft Teams, PagerDuty, Slack…)
+may land here over time.
 
 ## What you get from ContraForce
 
@@ -47,9 +48,9 @@ endpoints it relies on.
 
 ## Contributing
 
-PRs welcome — especially for new destinations (ServiceNow, Jira, Teams,
-PagerDuty). Keep samples small and focused: one scenario per folder, a
-clear README, no inherited dependencies from unrelated samples.
+PRs welcome — especially for new destinations (Jira, Teams, PagerDuty). Keep
+samples small and focused: one scenario per folder, a clear README, no
+inherited dependencies from unrelated samples.
 
 ## License
 
